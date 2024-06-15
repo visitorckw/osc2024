@@ -1,0 +1,699 @@
+commit 341bdb1d50b94050233a7186d8937e2e31658956
+Author: Kuan-Wei Chiu <visitorckw@gmail.com>
+Date:   Thu Jun 20 01:46:51 2024 +0800
+
+    finish lab4
+
+diff --git a/lab3/kernel/buddy.c b/lab3/kernel/buddy.c
+new file mode 100644
+index 00000000..b54de3a5
+--- /dev/null
++++ b/lab3/kernel/buddy.c
+@@ -0,0 +1,252 @@
++#include "kernel/io.h"
++#include "kernel/memory.h"
++
++#include "mm.h"
++
++static page_t *mem_map;
++static page_t *free_areas[MAX_ORDER + 1];
++
++static inline void __push_page(page_t **head, page_t *page) {
++    if (*head == NULL) {
++        *head = page;
++        return;
++    }
++
++    page->next = *head;
++    (*head)->prev = page;
++    *head = page;
++}
++
++static inline page_t *__pop_page(page_t **head) {
++    if (*head == NULL) {
++        return NULL;
++    }
++    page_t *page = *head;
++
++    *head = page->next;
++    page->next = NULL;
++
++    if (*head) {  // unlink the head
++        (*head)->prev = NULL;
++    }
++    return page;
++}
++
++static inline void __remove_page(page_t **head, page_t *page) {
++    if (page->prev) {
++        page->prev->next = page->next;
++    } else {
++        *head = page->next;
++    }
++
++    if (page->next) {
++        page->next->prev = page->prev;
++    }
++}
++
++void buddy_init(phys_addr_t start, phys_addr_t end) {
++    uintptr_t buddy_size = (uintptr_t)end - (uintptr_t)start;
++
++    print_string("Buddy size: ");
++    print_d(buddy_size);
++    print_string("\nFrom ");
++    print_h((uint64_t)start);
++    print_string(" to ");
++    print_h((uint64_t)end);
++    print_string("\n");
++
++    // split the memory into max order pages and add them to free areas
++    for (int i = 0; i <= MAX_ORDER; i++) {
++        free_areas[i] = NULL;
++    }
++
++    int num_of_pages = buddy_size / PAGE_SIZE;
++
++    print_string("Number of pages: ");
++    print_d(num_of_pages);
++    print_string("\n");
++
++    mem_map = simple_malloc(num_of_pages * sizeof(page_t));
++    for (int i = num_of_pages - 1; i >= 0; i--) {
++        mem_map[i].order = MAX_ORDER;
++        mem_map[i].status = PAGE_FREE;
++        mem_map[i].prev = NULL;
++        mem_map[i].next = NULL;
++
++        if (i % (1 << MAX_ORDER) ==
++            0) {  // push the chunk of page to the free area
++            __push_page(&free_areas[MAX_ORDER], &mem_map[i]);
++        }
++    }
++
++    print_free_areas();
++}
++
++page_t *alloc_pages(unsigned long order) {
++    unsigned long cur_order;
++    for (cur_order = order; cur_order <= MAX_ORDER; cur_order++) {
++        if (free_areas[cur_order]) {
++            page_t *page = __pop_page(&free_areas[cur_order]);
++
++            // split the page into smaller pages
++            while (cur_order > order) {
++                cur_order--;
++                uint32_t buddy_pfn = (page - mem_map) ^ (1 << cur_order);
++                page_t *buddy = &mem_map[buddy_pfn];
++                buddy->order = cur_order;
++                __push_page(&free_areas[cur_order], buddy);
++            }
++
++            page->order = order;
++            page->status = PAGE_ALLOCATED;
++            return page;
++        }
++    }
++    return NULL;  // 沒有可用記憶體
++}
++
++void free_pages(page_t *page, unsigned long order) {
++    int cur_order = order;
++    for (; cur_order < MAX_ORDER; cur_order++) {
++        uint32_t buddy_pfn = (page - mem_map) ^ (1 << cur_order);
++        page_t *buddy = &mem_map[buddy_pfn];
++
++        print_string("\ni: ");
++        print_d(cur_order);
++        print_string("----------\n");
++        print_string("Page: ");
++        print_h((uint64_t)get_addr_by_page(page));
++        print_string("\nBuddy: ");
++        print_h((uint64_t)get_addr_by_page(buddy));
++        print_string("\nbuddy_order: ");
++        print_d(buddy->order);
++        print_string("\nbuddy_status: ");
++        print_d(buddy->status);
++
++        if (buddy->order != cur_order || buddy->status != PAGE_FREE) {
++            break;
++        }
++
++        __remove_page(&free_areas[cur_order], buddy);
++        page = (page < buddy)
++                   ? page
++                   : buddy;  // update the page pointer to the lower address
++    }
++
++    page->status = PAGE_FREE;
++    page->order = cur_order;
++    print_string("\nPush page: ");
++    print_h((uint64_t)get_addr_by_page(page));
++    print_string("\nTo order ");
++    print_d(cur_order);
++    print_string("\n");
++    __push_page(&free_areas[cur_order], page);
++}
++
++void print_free_areas() {
++    for (int i = 0; i <= MAX_ORDER; i++) {
++        page_t *page = free_areas[i];
++        print_string("Order ");
++        print_d(i);
++        print_string(": ");
++        int count = 0;
++        while (page) {
++            print_h((uint64_t)get_addr_by_page(page));
++            print_string(" -> ");
++            page = page->next;
++
++            // if (count++ > 100) {
++                // break;
++            // }
++        }
++        print_string("NULL\n");
++    }
++}
++
++phys_addr_t get_addr_by_page(page_t *page) {
++    // print_string("Get addr by page: ");
++    // print_h((uint64_t)(((page - mem_map) << PAGE_SHIFT) + (void *)start));
++    // print_string("\n");
++    return (phys_addr_t)((page - mem_map) << PAGE_SHIFT);
++}
++
++page_t *get_page_by_addr(phys_addr_t addr) {
++    // print_string("Get page by addr: ");
++    // print_h((uint64_t)&mem_map[(addr - start) >> PAGE_SHIFT]);
++    return &mem_map[(uint64_t)(void *)addr >> PAGE_SHIFT];
++}
++
++void memory_reserve(phys_addr_t start, phys_addr_t end) {
++    print_string("Reserve memory: ");
++    print_h((uint64_t)start);
++    print_string(" - ");
++    print_h((uint64_t)end);
++    print_string("\n");
++    
++    for(int cur_order = MAX_ORDER; cur_order >= 0; cur_order--) {
++        page_t *page = free_areas[cur_order];
++        while(page != NULL) {
++            page_t *next_page = page->next;
++
++            phys_addr_t page_addr = get_addr_by_page(page);
++            phys_addr_t page_end = (void*)page_addr + (1 << (cur_order + PAGE_SHIFT)) - 1;
++
++            if(cur_order == 0) {
++                if(!(page_end < start || page_addr > end)) {
++                    print_string("\nPage partially reserved\n");
++                    page->status = PAGE_RESERVED;
++                    __remove_page(&free_areas[cur_order], page);
++                }
++            } else if(page_addr >= start && page_end <= end) {
++                print_string("\nPage fully reserved\n");
++                print_h((uint64_t)page_addr);
++                print_string(" - ");
++                print_h((uint64_t)page_end);
++                print_string("\n");
++
++                page->status = PAGE_RESERVED;
++                __remove_page(&free_areas[cur_order], page);
++            } else if(start > page_end || end < page_addr) { // page out of range
++                // print_string("\nPage out of range\n");
++            } else { // split the overlapping page using buddy
++                // print_string("\nFind buddy\n");
++                // print_string("\nPage: ");
++                // print_h((uint64_t)page_addr);
++                // print_string("\n");
++                // print_string("\nCur order: ");
++                // print_d(cur_order);
++                // print_string("\n");
++
++                uint32_t buddy_pfn = (page - mem_map) ^ (1 << (cur_order - 1));
++                page_t *buddy = &mem_map[buddy_pfn];
++
++                print_string("Split page: ");
++                print_h((uint64_t)page_addr);
++                print_string(", ");
++                print_h((uint64_t)get_addr_by_page(buddy));
++                print_string(", ");
++                print_h((uint64_t)buddy_pfn);
++                print_string("\n");
++
++                // remove the original page from the free area
++                print_string("\nRemove page ");
++                print_h((uint64_t)get_addr_by_page(page));
++                print_string(" from order ");
++                print_d(cur_order);
++                print_string("\n");
++                __remove_page(&free_areas[cur_order], page);
++                buddy->order = cur_order - 1;
++                page->order = cur_order - 1;
++                page->prev = NULL;
++                // push split page to the free area
++                __push_page(&free_areas[cur_order - 1], buddy);
++                __push_page(&free_areas[cur_order - 1], page);
++            }
++
++            // print_string("\nNext page\n");
++            // print_h((uint64_t)get_addr_by_page(next_page));
++
++            page = next_page;
++        }
++    }
++}
+diff --git a/lab3/kernel/command/command.h b/lab3/kernel/command/command.h
+index b76a96c9..961744df 100644
+--- a/lab3/kernel/command/command.h
++++ b/lab3/kernel/command/command.h
+@@ -16,5 +16,7 @@ extern struct command test_malloc_command;
+ extern struct command async_io_demo_command;
+ extern struct command exec_command;
+ extern struct command set_timeout_command;
++extern struct command test_kmalloc_command;
++extern struct command test_kfree_command;
+ 
+ #endif
+diff --git a/lab3/kernel/command/memory.c b/lab3/kernel/command/memory.c
+index 3a96d784..896a670d 100644
+--- a/lab3/kernel/command/memory.c
++++ b/lab3/kernel/command/memory.c
+@@ -2,6 +2,7 @@
+ 
+ #include "command.h"
+ #include "kernel/io.h"
++#include "lib/stdlib.h"
+ 
+ void _test_malloc_command(int argc, char **argv)
+ {
+@@ -28,3 +29,47 @@ void _test_malloc_command(int argc, char **argv)
+ struct command test_malloc_command = { .name = "test_malloc",
+ 				       .description = "test malloc",
+ 				       .function = &_test_malloc_command };
++
++void _test_kmalloc_comand(int argc, char **argv) {
++    if (argc != 2) {
++        print_string("\nUsage: test_kmalloc <size>\n");
++        return;
++    }
++
++    unsigned int size = atoi(argv[1]);
++    print_string("\nMalloc size: ");
++    print_string(argv[1]);
++    void *ptr = kmalloc(size);
++    if (ptr == 0) {
++        print_string("\nMalloc failed! ");
++    }
++    print_string("\nMalloc address: ");
++    print_h((uint64_t)ptr);
++    print_string(", ");
++    print_d((uint64_t)ptr);
++    print_string("\n");
++
++    // print_kmalloc_caches();
++    print_free_areas();
++}
++
++struct command test_kmalloc_command = {.name = "test_kmalloc",
++                                       .description = "test kmalloc",
++                                       .function = &_test_kmalloc_comand};
++
++void _test_kfree_command(int argc, char **argv) {
++    if (argc != 2) {
++        print_string("\nUsage: test_kfree <address>\n");
++        return;
++    }
++    unsigned int addr = atoi(argv[1]);
++    kfree((void *)addr);
++    print_string("\nFree address: ");
++    print_h(addr);
++    print_string("\n");
++    print_free_areas();
++}
++
++struct command test_kfree_command = {.name = "test_kfree",
++                                     .description = "test kfree",
++                                     .function = &_test_kfree_command};
+diff --git a/lab3/kernel/console.c b/lab3/kernel/console.c
+index fd595eeb..abd3b204 100644
+--- a/lab3/kernel/console.c
++++ b/lab3/kernel/console.c
+@@ -75,6 +75,8 @@ void register_all_commands(struct console *console)
+ 	register_command(console, &test_malloc_command);
+ 	register_command(console, &async_io_demo_command);
+ 	register_command(console, &set_timeout_command);
++	register_command(console, &test_kmalloc_command);
++	register_command(console, &test_kfree_command);
+ }
+ 
+ static void read_command(char *x)
+diff --git a/lab3/kernel/device_tree.c b/lab3/kernel/device_tree.c
+index e91a1c2e..ff09256f 100644
+--- a/lab3/kernel/device_tree.c
++++ b/lab3/kernel/device_tree.c
+@@ -5,6 +5,8 @@
+ #include "lib/string.h"
+ #include "lib/utils.h"
+ 
++static uint64_t initrd_start, initrd_end;
++
+ /**
+  * @brief Convert a 4-byte big-endian sequence to little-endian.
+  *
+@@ -49,10 +51,18 @@ void fdt_traverse(void (*callback)(void *))
+ 			ptr += 4;
+ 			uint32_t nameoff = be2le((char *)ptr);
+ 			ptr += 4;
+-			if (strcmp((char *)(strings + nameoff),
+-				   "linux,initrd-start") == 0) {
+-				callback(
+-					(void *)(uint32_t *)be2le((void *)ptr));
++			// if (strcmp((char *)(strings + nameoff),
++			// 	   "linux,initrd-start") == 0) {
++			// 	callback(
++			// 		(void *)(uint32_t *)be2le((void *)ptr));
++			// }
++			if (strcmp((char *)(strings + nameoff), "linux,initrd-start") ==
++				0) {
++				initrd_start = be2le((void *)ptr);
++				callback((void *)(uint32_t *)be2le((void *)ptr));
++			} else if (strcmp((char *)(strings + nameoff),
++								"linux,initrd-end") == 0) {
++				initrd_end = be2le((void *)ptr);
+ 			}
+ 			ptr += align4(len);
+ 			break;
+@@ -70,3 +80,6 @@ static uint32_t be2le(const void *s)
+ 	return (uint32_t)bytes[0] << 24 | (uint32_t)bytes[1] << 16 |
+ 	       (uint32_t)bytes[2] << 8 | (uint32_t)bytes[3];
+ }
++
++uint64_t fdt_get_initrd_start() { return initrd_start; }
++uint64_t fdt_get_initrd_end() { return initrd_end; }
+diff --git a/lab3/kernel/device_tree.h b/lab3/kernel/device_tree.h
+index 4c8bcbb5..5e374ce8 100644
+--- a/lab3/kernel/device_tree.h
++++ b/lab3/kernel/device_tree.h
+@@ -24,5 +24,7 @@ struct fdt_header {
+ #define FDT_END 0x00000009
+ 
+ void fdt_traverse(void (*callback)(void *));
++uint64_t fdt_get_initrd_start();
++uint64_t fdt_get_initrd_end();
+ 
+ #endif
+diff --git a/lab3/kernel/kmalloc.c b/lab3/kernel/kmalloc.c
+new file mode 100644
+index 00000000..8568b63c
+--- /dev/null
++++ b/lab3/kernel/kmalloc.c
+@@ -0,0 +1,133 @@
++#include "kernel/device_tree.h"
++#include "kernel/io.h"
++#include "kernel/memory.h"
++
++#include "mm.h"
++
++#define KMEM_CACHE_MIN_ORDER 4  // 16
++#define KMEM_CACHE_MAX_ORDER 8  // 256
++
++typedef struct kmem_cache {
++    struct kmem_cache *next;
++    unsigned long order;
++} kmem_cache_t;
++
++static kmem_cache_t
++    *kmalloc_caches[KMEM_CACHE_MAX_ORDER - KMEM_CACHE_MIN_ORDER];
++
++uint32_t get_page_order_by_size(uint32_t size) {
++    uint32_t order = 0;
++    while (size > (1 << (PAGE_SHIFT + order))) {
++        order++;
++    }
++    print_string("\nGet order: ");
++    print_d(order);
++    print_string("\n");
++    return order;
++}
++
++uint32_t get_cache_order_by_size(uint32_t size) {
++    uint32_t order = 0;
++    while (size > (1 << (order + KMEM_CACHE_MIN_ORDER))) {
++        order++;
++    }
++    return order;
++}
++
++extern uint64_t __heap_start;
++void init_kmalloc() {
++    // buddy_init((phys_addr_t)0x10000000, (phys_addr_t)0x20000000);
++    buddy_init((phys_addr_t)0x0, (phys_addr_t)0x3C000000);
++    memory_reserve(0x0, (phys_addr_t)0x1000);  // Spin tables for multicore boot
++                                               // (0x0000 - 0x1000)
++    memory_reserve((phys_addr_t)0x80000,
++                   (phys_addr_t)&__heap_start);  // Kernel code and data
++
++    memory_reserve((phys_addr_t)&__heap_start,
++                   (phys_addr_t)((void *)&__heap_start + 0x100000));  // Startup allocator
++    
++    print_free_areas();
++
++    memory_reserve((phys_addr_t)fdt_get_initrd_start(),
++                   (phys_addr_t)fdt_get_initrd_end());  // Initramfs
++
++    print_free_areas();
++}
++
++void print_kmalloc_caches() {
++    for (int i = 0; i < KMEM_CACHE_MAX_ORDER - KMEM_CACHE_MIN_ORDER; i++) {
++        kmem_cache_t *cache = kmalloc_caches[i];
++        print_string("Cache Order ");
++        print_d(i);
++        print_string(": ");
++        while (cache != NULL) {
++            print_h((uint32_t)cache);
++            print_string(" -> ");
++            cache = cache->next;
++        }
++        print_string("NULL\n");
++    }
++}
++
++void *kmem_cache_alloc(uint32_t order) {
++    if (order > KMEM_CACHE_MAX_ORDER - KMEM_CACHE_MIN_ORDER) {
++        return NULL;
++    }
++    if (kmalloc_caches[order] == NULL) {
++        page_t *page = alloc_pages(0);
++        page->status = PAGE_CACHE;  // mark as cache page
++        uint32_t cache_size = 1 << (order + KMEM_CACHE_MIN_ORDER);
++        for (int i = 0; i < PAGE_SIZE; i += cache_size) {
++            kmem_cache_t *cache = ((void *)get_addr_by_page(page) + i);
++            cache->order = order;
++            cache->next = kmalloc_caches[order];
++            kmalloc_caches[order] = cache;
++        }
++    }
++    kmem_cache_t *cache = kmalloc_caches[order];
++    kmalloc_caches[order] = cache->next;
++
++    print_kmalloc_caches();
++
++    return cache;
++}
++
++void kmem_cache_free(void *ptr, uint32_t order) {
++    if (order > KMEM_CACHE_MAX_ORDER - KMEM_CACHE_MIN_ORDER) {
++        return;
++    }
++    // push cache back to the list
++    kmem_cache_t *cache = (kmem_cache_t *)ptr;
++    cache->next = kmalloc_caches[order];
++    kmalloc_caches[order] = cache;
++
++    print_kmalloc_caches();
++}
++
++void *kmalloc(uint32_t size) {
++    uint32_t order = get_page_order_by_size(size);
++    if (order > MAX_ORDER) {
++        return NULL;
++    }
++
++    if (order == 0) {
++        if (size >= (1 << KMEM_CACHE_MAX_ORDER)) {
++            return get_addr_by_page(alloc_pages(order));
++        }
++
++        uint32_t cache_order = get_cache_order_by_size(size);
++        return kmem_cache_alloc(cache_order);
++    }
++
++    return get_addr_by_page(alloc_pages(order));
++}
++
++void kfree(void *ptr) {
++    if ((uintptr_t)ptr % PAGE_SIZE == 0) {
++        page_t *page = get_page_by_addr(ptr);
++        free_pages(page, page->order);
++        return;
++    }
++    kmem_cache_t *cache = (kmem_cache_t *)ptr;
++    kmem_cache_free(cache, cache->order);
++}
+diff --git a/lab3/kernel/linker.ld b/lab3/kernel/linker.ld
+index 89c14737..087ca196 100644
+--- a/lab3/kernel/linker.ld
++++ b/lab3/kernel/linker.ld
+@@ -1,6 +1,8 @@
+ 
+ SECTIONS
+ {
++  . = 0x80000;
++  __loader_start = .;
+   . = 0x80000;
+   .text : 
+   {
+@@ -17,6 +19,8 @@ SECTIONS
+ 	    __bss_end = .;
+   }
+   . = ALIGN(8);
+-  _end = .;
++  __heap_start = .;
++  __loader_end = .;
+ }
+ __bss_size = (__bss_end - __bss_start) >> 3;
++__loader_size = (__loader_end - __loader_start) >> 3;
+diff --git a/lab3/kernel/main.c b/lab3/kernel/main.c
+index ff2e1135..e6911071 100644
+--- a/lab3/kernel/main.c
++++ b/lab3/kernel/main.c
+@@ -7,6 +7,7 @@
+ #include "kernel/timer.h"
+ #include "memory.h"
+ #include "task_queue.h"
++#include "mm.h"
+ 
+ void print_boot_timeout(int delay)
+ {
+@@ -30,6 +31,9 @@ int main()
+ 	core_timer_enable();
+ 	init_task_queue();
+ 
++	// lab4
++    init_kmalloc();
++
+ 	struct console *console = console_create();
+ 	register_all_commands(console);
+ 
+diff --git a/lab3/kernel/memory.c b/lab3/kernel/memory.c
+index ba11b075..75eb288f 100644
+--- a/lab3/kernel/memory.c
++++ b/lab3/kernel/memory.c
+@@ -1,36 +1,28 @@
+-#include "memory.h"
++#include <kernel/io.h>
++#include <kernel/memory.h>
++#include <lib/stdlib.h>
+ 
+-#include "io.h"
+-#include "lib/stdlib.h"
+-#include "lib/utils.h"
+-
+-extern int _end;
+-#define HEAP_MAX (&_end) + 0x10000
++extern uint64_t __heap_start;
++#define HEAP_MAX (&__heap_start) + 0x100000
+ 
+ static char *heap_top;
+ 
+-void init_memory()
+-{
+-	heap_top = (&_end);
+-	// heap_top++;
++void init_memory() {
++    heap_top = (&__heap_start);
++    // heap_top++;
+ }
+ 
+-void *simple_malloc(unsigned int size)
+-{
+-	if (size == 0) {
+-		return NULL;
+-	}
+-	size = align4(size);
+-	if (heap_top + size >= HEAP_MAX) {
+-		print_string("Out of memory\n");
+-		return NULL;
+-	}
+-	void *ret = heap_top;
+-	heap_top += size;
+-	return ret;
++void *simple_malloc(unsigned int size) {
++    if (size == 0) {
++        return NULL;
++    }
++    if (heap_top + size >= HEAP_MAX) {
++        print_string("Out of memory\n");
++        return NULL;
++    }
++    void *ret = heap_top;
++    heap_top += size;
++    return ret;
+ }
+ 
+-char *get_heap_top()
+-{
+-	return heap_top;
+-}
++char *get_heap_top() { return heap_top; }
+diff --git a/lab3/kernel/mm.h b/lab3/kernel/mm.h
+new file mode 100644
+index 00000000..2d66dcfa
+--- /dev/null
++++ b/lab3/kernel/mm.h
+@@ -0,0 +1,31 @@
++#ifndef __MM_TYPE_H__
++#define __MM_TYPE_H__
++
++#include "lib/stdlib.h"
++
++#define MAX_ORDER 10
++#define PAGE_SIZE 4096
++#define PAGE_SHIFT 12
++
++#define PAGE_FREE 0
++#define PAGE_ALLOCATED 1
++#define PAGE_CACHE 2
++#define PAGE_RESERVED 3
++
++typedef uintptr_t *phys_addr_t;  // 節點結構，代表自由區塊
++typedef struct page {
++    struct page *prev, *next;  // 指向同一 order 的下一個節點
++    unsigned long order;
++    uint8_t status;  // 0: free, 1: allocated
++} page_t;
++
++void buddy_init(phys_addr_t start, phys_addr_t end);
++page_t *alloc_pages(unsigned long order);
++void free_pages(page_t *page, unsigned long order);
++
++phys_addr_t get_addr_by_page(page_t *page);
++page_t *get_page_by_addr(phys_addr_t addr);
++
++void memory_reserve(phys_addr_t, phys_addr_t);
++
++#endif
+diff --git a/lab3/lib/stdlib.h b/lab3/lib/stdlib.h
+index 43c796ae..e60ef945 100644
+--- a/lab3/lib/stdlib.h
++++ b/lab3/lib/stdlib.h
+@@ -8,6 +8,8 @@ typedef unsigned short uint16_t;
+ typedef unsigned int uint32_t;
+ typedef unsigned long long uint64_t;
+ 
++typedef uint64_t uintptr_t;
++
+ int atoi(const char *);
+ void itoa(int, char *);
+ 
